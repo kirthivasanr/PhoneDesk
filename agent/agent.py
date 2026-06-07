@@ -35,7 +35,7 @@ active_connections = {
 }
 
 
-DEFAULT_TOKEN = "kirthi911"
+DEFAULT_TOKEN = "YOUR-TOKEN"
 TOKEN = os.getenv("REMOTE_DESKTOP_TOKEN", DEFAULT_TOKEN)
 SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "screenshots"))
 
