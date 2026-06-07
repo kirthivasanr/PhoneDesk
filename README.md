@@ -1,4 +1,4 @@
-# Connect — Remote Desktop from Your Phone
+# PhoneDesk  — Remote Desktop from Your Phone
 
 Control and monitor your Windows laptop from anywhere using your Android phone. Built with a Python FastAPI agent on the laptop and a React Native app on mobile.
 
