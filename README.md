@@ -219,7 +219,7 @@ Right-click the tray icon for these options:
 ### Same WiFi (Local)
 Enter in the app:
 ```
-http://192.168.29.31:8000
+http://192.168.x.x:8000
 ```
 
 ### Remote (Tailscale)
