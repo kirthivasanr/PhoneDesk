@@ -3,11 +3,15 @@ import asyncio
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import ctypes
+import cv2
 import mss
+import numpy as np
 import psutil
 import pyautogui
 import uvicorn
@@ -17,16 +21,28 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, W
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 import threading
 import queue
+
+try:
+    import dxcam
+except ImportError:
+    dxcam = None
 import soundcard as sc
-import numpy as np
 
 import pystray
 import pyperclip
 import tkinter as tk
 from tkinter import ttk
+
+# pywin32 — used only for talking to the unlock service over a named pipe.
+try:
+    import win32file
+    import pywintypes
+    UNLOCK_SERVICE_AVAILABLE = True
+except ImportError:
+    UNLOCK_SERVICE_AVAILABLE = False
 
 active_connections = {
     "mjpeg": 0,
@@ -38,8 +54,155 @@ active_connections = {
 DEFAULT_TOKEN = "kirthi911"
 TOKEN = os.getenv("REMOTE_DESKTOP_TOKEN", DEFAULT_TOKEN)
 SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "screenshots"))
+STREAM_FPS = 60
 
-app = FastAPI(title="Remote Desktop Laptop Agent")
+# Must match SERVICE_AUTH_TOKEN in unlock_service.py.
+UNLOCK_PIPE_NAME = r"\\.\pipe\ConnectUnlockService"
+UNLOCK_AUTH_TOKEN = "kirthi911-unlock"
+
+# dxcam returns one process-wide camera for each device/output/backend tuple.
+# Keep this camera alive for the agent lifetime so concurrent MJPEG clients only
+# borrow it instead of attempting to start the same singleton repeatedly.
+_dxcam_camera = None
+_dxcam_camera_lock = threading.Lock()
+_dxcam_initialization_failed = False
+_dxcam_reader_thread = None
+_dxcam_reader_lock = threading.Lock()
+_dxcam_reader_stop_event = threading.Event()
+_latest_frame = None
+_latest_frame_lock = threading.Lock()
+
+
+def get_shared_dxcam_camera():
+    """Return the single started DXcam camera, or None to use the mss fallback."""
+    global _dxcam_camera, _dxcam_initialization_failed
+
+    if _dxcam_camera is not None:
+        return _dxcam_camera
+
+    with _dxcam_camera_lock:
+        # Check again after acquiring the lock: another MJPEG client may have
+        # created and started the camera while this caller was waiting.
+        if _dxcam_camera is not None:
+            return _dxcam_camera
+        if _dxcam_initialization_failed:
+            return None
+        if dxcam is None:
+            _dxcam_initialization_failed = True
+            print("Warning: dxcam is unavailable; falling back to mss/GDI capture.")
+            return None
+
+        try:
+            camera = dxcam.create(output_idx=0, output_color="BGR")
+            if not camera.is_capturing:
+                camera.start(target_fps=STREAM_FPS, video_mode=True)
+            _dxcam_camera = camera
+            print("Using shared DXGI desktop capture (dxcam) for MJPEG streaming.")
+            return camera
+        except Exception as error:
+            _dxcam_initialization_failed = True
+            print(
+                "Warning: shared DXGI desktop capture could not start "
+                f"({error}); falling back to mss/GDI capture."
+            )
+            return None
+
+
+def _dxcam_reader_loop():
+    """The only process thread allowed to consume DXcam's frame buffer."""
+    global _latest_frame
+
+    while not _dxcam_reader_stop_event.is_set():
+        camera = get_shared_dxcam_camera()
+        if camera is None:
+            return
+
+        try:
+            # In dxcam 0.3.0 this blocks until the producer has buffered a
+            # frame, so a sleep after a successful read would only add latency.
+            frame = camera.get_latest_frame()
+        except Exception as error:
+            print(f"Shared DXGI frame reader error: {error}")
+            time.sleep(0.1)
+            continue
+
+        if frame is not None:
+            # get_latest_frame(copy=True) is the default, so this frame is no
+            # longer backed by dxcam's mutable ring buffer.
+            with _latest_frame_lock:
+                _latest_frame = frame
+        elif not _dxcam_reader_stop_event.is_set():
+            # None means capture stopped or its buffer is unavailable. Yield so
+            # an unexpected non-blocking implementation cannot spin a CPU core.
+            time.sleep(0.01)
+
+
+def start_shared_dxcam_reader() -> bool:
+    """Lazily start the one reader that publishes frames for all clients."""
+    global _dxcam_reader_thread
+
+    if get_shared_dxcam_camera() is None:
+        return False
+    if _dxcam_reader_thread is not None and _dxcam_reader_thread.is_alive():
+        return True
+
+    with _dxcam_reader_lock:
+        if _dxcam_reader_thread is not None and _dxcam_reader_thread.is_alive():
+            return True
+        _dxcam_reader_stop_event.clear()
+        _dxcam_reader_thread = threading.Thread(
+            target=_dxcam_reader_loop,
+            name="DXcamFrameReader",
+            daemon=True,
+        )
+        _dxcam_reader_thread.start()
+    return True
+
+
+def get_current_frame():
+    """Return the latest completed DXcam frame for an individual MJPEG client."""
+    with _latest_frame_lock:
+        return _latest_frame
+
+
+def stop_shared_dxcam_camera():
+    """Release the process-wide DXcam resource during agent shutdown only."""
+    global _dxcam_camera, _dxcam_reader_thread, _latest_frame
+
+    _dxcam_reader_stop_event.set()
+
+    with _dxcam_camera_lock:
+        camera = _dxcam_camera
+        _dxcam_camera = None
+    if camera is not None:
+        try:
+            camera.stop()
+        except Exception:
+            pass
+    with _dxcam_reader_lock:
+        reader_thread = _dxcam_reader_thread
+        _dxcam_reader_thread = None
+    if reader_thread is not None and reader_thread is not threading.current_thread():
+        reader_thread.join(timeout=1.0)
+    with _latest_frame_lock:
+        _latest_frame = None
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle (replaces deprecated @app.on_event)
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- startup: nothing needed yet ---
+    yield
+    # --- shutdown ---
+    stop_shared_dxcam_camera()
+    # (previously called ngrok.kill() here, but ngrok was never used/imported
+    # in this file — removed as dead code)
+
+
+app = FastAPI(title="Remote Desktop Laptop Agent", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -118,15 +281,55 @@ def process_snapshot() -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle events
+# Lock-screen detection + unlock
 # ---------------------------------------------------------------------------
 
-@app.on_event("shutdown")
-def on_shutdown() -> None:
+def is_workstation_locked() -> bool:
+    """True when the interactive desktop can't be opened — i.e. the
+    Winlogon secure desktop (lock screen) is showing instead."""
+    hDesktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0)
+    if not hDesktop:
+        return True
+    ctypes.windll.user32.CloseDesktop(hDesktop)
+    return False
+
+
+def build_placeholder_frame(width: int = 1280, height: int = 720) -> bytes:
+    img = Image.new("RGB", (width, height), color=(15, 23, 42))
+    draw = ImageDraw.Draw(img)
+    text = "Locked — tap Unlock in the app"
     try:
-        ngrok.kill()
+        bbox = draw.textbbox((0, 0), text)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     except Exception:
-        pass
+        tw, th = (len(text) * 8, 16)
+    draw.text(((width - tw) // 2, (height - th) // 2), text, fill=(226, 232, 240))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+PLACEHOLDER_FRAME = build_placeholder_frame()
+
+
+def request_unlock_from_service() -> bool:
+    """Ask ConnectUnlockService (a separate Windows Service) to type the
+    stored password on the Winlogon desktop. Returns False if the
+    service isn't installed/running or refuses the request."""
+    if not UNLOCK_SERVICE_AVAILABLE:
+        return False
+    try:
+        handle = win32file.CreateFile(
+            UNLOCK_PIPE_NAME,
+            win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+            0, None, win32file.OPEN_EXISTING, 0, None,
+        )
+        win32file.WriteFile(handle, f"{UNLOCK_AUTH_TOKEN}:unlock".encode("utf-8"))
+        _, resp = win32file.ReadFile(handle, 64)
+        win32file.CloseHandle(handle)
+        return resp.strip() == b"OK"
+    except pywintypes.error:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +342,7 @@ def status() -> Dict[str, Any]:
         "cpu": psutil.cpu_percent(interval=0.1),
         "ram": psutil.virtual_memory().percent,
         "processes": process_snapshot(),
+        "locked": is_workstation_locked(),
     }
 
 
@@ -147,7 +351,29 @@ def screen_info(token: str = Query(default="")) -> Dict[str, Any]:
     """Return the primary monitor resolution. Auth via ?token= query param."""
     if token != TOKEN:
         raise HTTPException(status_code=401, detail="Invalid token")
-    return get_primary_monitor()
+    if is_workstation_locked():
+        return {"width": 1280, "height": 720, "locked": True}
+    info = get_primary_monitor()
+    info["locked"] = False
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Unlock control endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/control/unlock", dependencies=[Depends(require_token)])
+def unlock_workstation() -> Dict[str, Any]:
+    if not is_workstation_locked():
+        return {"ok": True, "already_unlocked": True}
+    ok = request_unlock_from_service()
+    if not ok:
+        raise HTTPException(
+            status_code=503,
+            detail="Unlock service unavailable or refused the request. "
+                   "Is ConnectUnlockService installed and running?",
+        )
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +387,8 @@ class CaptureManager:
         self.last_tick = time.time()
         self.thread = None
         self.watchdog_thread = None
+        self.camera = None
+        self.use_dxcam = True
 
     def start(self):
         self.stop_event.clear()
@@ -173,56 +401,119 @@ class CaptureManager:
 
     def stop(self):
         self.stop_event.set()
+        self._stop_camera()
         if self.thread:
             self.thread.join(timeout=1.0)
         if self.watchdog_thread:
             self.watchdog_thread.join(timeout=1.0)
 
+    def _start_dxcam(self):
+        """Borrow the process-wide DXcam camera, or use the mss fallback."""
+        if not self.use_dxcam:
+            return None
+
+        self.camera = get_shared_dxcam_camera()
+        if self.camera is not None and not start_shared_dxcam_reader():
+            self.camera = None
+        return self.camera
+
+    def _stop_camera(self, camera=None):
+        # CaptureManager only borrows the shared camera. A disconnect or
+        # watchdog restart must never stop it while another viewer uses it.
+        if camera is None or self.camera is camera:
+            self.camera = None
+
     def _capture_loop(self):
-        sct = mss.mss()
-        try:
+        camera = self._start_dxcam()
+        sct = None
+        monitor = None
+        if camera is None:
+            sct = mss.mss()
             monitor = sct.monitors[1]
+
+        try:
             last_hash = None
-            last_mouse_pos = pyautogui.position()
-            last_mouse_move_time = 0.0
             last_frame_data = None
             last_frame_time = 0.0
-            
+            was_locked = False
+            last_placeholder_push = 0.0
+
             while not self.stop_event.is_set():
                 start_time = time.time()
                 self.last_tick = start_time
-                
-                try:
-                    sct_img = sct.grab(monitor)
-                except Exception as e:
-                    print(f"Screen capture error: {e}")
-                    try:
-                        sct.close()
-                    except Exception:
-                        pass
-                    time.sleep(0.1)
-                    sct = mss.mss()
-                    monitor = sct.monitors[1]
+
+                if is_workstation_locked():
+                    was_locked = True
+                    # Push the placeholder about once a second so the
+                    # MJPEG stream stays alive without hammering the CPU.
+                    if start_time - last_placeholder_push >= 1.0:
+                        if self.queue.full():
+                            try:
+                                self.queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                        self.queue.put(PLACEHOLDER_FRAME)
+                        last_placeholder_push = start_time
+                    time.sleep(0.2)
                     continue
-                    
-                current_mouse_pos = pyautogui.position()
-                if current_mouse_pos != last_mouse_pos:
-                    last_mouse_move_time = start_time
-                    last_mouse_pos = current_mouse_pos
-                    
-                current_hash = hash(sct_img.bgra[::1000])
+
+                if was_locked:
+                    # Just unlocked — reset capture state so we don't
+                    # compare against a stale hash from before locking.
+                    was_locked = False
+                    last_hash = None
+
+                try:
+                    if camera is not None:
+                        frame = get_current_frame()
+                        if frame is None:
+                            # The single DXcam reader has not published a frame yet.
+                            # Retain the existing per-client keepalive behavior.
+                            if (
+                                last_frame_data is not None
+                                and (start_time - last_frame_time) >= 1.0
+                            ):
+                                if self.queue.full():
+                                    try:
+                                        self.queue.get_nowait()
+                                    except queue.Empty:
+                                        pass
+                                self.queue.put(last_frame_data)
+                                last_frame_time = start_time
+                            time.sleep(0.005)
+                            continue
+                    else:
+                        sct_img = sct.grab(monitor)
+                        # mss produces BGRA; JPEG encoding only needs BGR.
+                        frame = np.asarray(sct_img)[:, :, :3]
+                except Exception as error:
+                    print(f"Screen capture error: {error}")
+                    if camera is not None:
+                        self._stop_camera(camera)
+                        camera = None
+                        self.use_dxcam = False
+                        print("Warning: DXGI capture failed; falling back to mss/GDI capture.")
+                    else:
+                        try:
+                            sct.close()
+                        except Exception:
+                            pass
+                    time.sleep(0.1)
+                    if camera is None:
+                        sct = mss.mss()
+                        monitor = sct.monitors[1]
+                    continue
+
+                current_hash = hash(frame[::50, ::50].tobytes())
                 
                 if current_hash != last_hash:
-                    img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                    
-                    if start_time - last_mouse_move_time < 1.0:
-                        img = img.resize((1280, 720), Image.Resampling.BILINEAR)
-                        
-                    img = img.filter(ImageFilter.SHARPEN)
-                    
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=97, optimize=False, subsampling=0)
-                    frame_data = buf.getvalue()
+                    success, encoded = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    )
+                    if not success:
+                        print("JPEG encoding failed; skipping frame.")
+                        continue
+                    frame_data = encoded.tobytes()
                     
                     if self.queue.full():
                         try:
@@ -244,14 +535,16 @@ class CaptureManager:
                     last_frame_time = start_time
                     
                 elapsed = time.time() - start_time
-                sleep_time = max(0, (1.0 / 30.0) - elapsed)
+                sleep_time = max(0, (1.0 / STREAM_FPS) - elapsed)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
         finally:
-            try:
-                sct.close()
-            except Exception:
-                pass
+            self._stop_camera(camera)
+            if sct is not None:
+                try:
+                    sct.close()
+                except Exception:
+                    pass
 
     def _watchdog_loop(self):
         while not self.stop_event.is_set():

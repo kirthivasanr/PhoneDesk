@@ -31,6 +31,10 @@ type ScreenSize = {
   height: number;
 };
 
+type AgentStatus = {
+  locked: boolean;
+};
+
 const STORAGE_KEY = "connect.remote.settings";
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
@@ -189,6 +193,10 @@ export default function App() {
   const [nextClickButton, setNextClickButton] = useState<"left" | "right">("left");
   const [keyboardText, setKeyboardText] = useState("");
   const [screenSize, setScreenSize] = useState<ScreenSize>({ width: 1920, height: 1080 });
+  const [isLocked, setIsLocked] = useState(false);
+  const [unlockPending, setUnlockPending] = useState(false);
+  const [unlockCooldown, setUnlockCooldown] = useState(false);
+  const [unlockMessage, setUnlockMessage] = useState<string | null>(null);
 
   const webViewRef = useRef<WebView | null>(null);
   const keyboardRef = useRef<TextInput | null>(null);
@@ -302,6 +310,69 @@ export default function App() {
       })
       .catch(() => {});
   }, [connection]);
+
+  // ---------------------------------------------------------------------------
+  // Keep the lock-screen state in sync with the agent.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!connection) {
+      setIsLocked(false);
+      return;
+    }
+
+    let cancelled = false;
+    let statusRequest: ReturnType<typeof setTimeout> | null = null;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const pollStatus = async () => {
+      const controller = new AbortController();
+      statusRequest = setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const response = await fetch(`${connection.url}/status`, {
+          headers: authHeaders(connection.token),
+          signal: controller.signal
+        });
+        if (!response.ok) return;
+
+        const status = (await response.json()) as AgentStatus;
+        if (!cancelled && typeof status.locked === "boolean") {
+          setIsLocked((current) => {
+            if (current !== status.locked) {
+              console.log("[lock-screen] status transition", {
+                from: current,
+                to: status.locked
+              });
+            }
+            return status.locked;
+          });
+          if (!status.locked) setUnlockMessage(null);
+        }
+      } catch {
+        // Streaming remains available even when a status poll temporarily fails.
+      } finally {
+        if (statusRequest) clearTimeout(statusRequest);
+        if (!cancelled) pollTimer = setTimeout(pollStatus, 3000);
+      }
+    };
+
+    pollStatus();
+    return () => {
+      cancelled = true;
+      if (statusRequest) clearTimeout(statusRequest);
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [connection]);
+
+  // Keep this trace enabled while validating on a device: it records the exact
+  // condition used to mount the overlay without coupling it to UI state.
+  useEffect(() => {
+    console.log("[lock-screen] render", {
+      isLocked,
+      overlayVisible: isLocked === true,
+      connected: connection !== null
+    });
+  }, [connection, isLocked]);
 
   // ---------------------------------------------------------------------------
   // Handle messages from the WebView (connection state updates)
@@ -421,8 +492,8 @@ export default function App() {
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
+        onStartShouldSetPanResponder: () => !isLocked,
+        onMoveShouldSetPanResponder: () => !isLocked,
 
         onPanResponderGrant: (event) => {
           const touches = event.nativeEvent.touches;
@@ -541,7 +612,7 @@ export default function App() {
           gestureStart.current.pinching = false;
         }
       }),
-    [controlMode, mapPoint, sendClick, sendPost]
+    [controlMode, isLocked, mapPoint, sendClick, sendPost]
   );
 
   // Keep offset clamped when zoom changes
@@ -565,6 +636,10 @@ export default function App() {
     setZoom(1);
     setOffset({ x: 0, y: 0 });
     setConnectionState("Disconnected");
+    setIsLocked(false);
+    setUnlockPending(false);
+    setUnlockCooldown(false);
+    setUnlockMessage(null);
   };
 
   const reconnect = () => {
@@ -604,6 +679,40 @@ export default function App() {
 
   const takeScreenshot = async () => {
     await sendPost("/control/screenshot").catch(() => undefined);
+  };
+
+  const requestUnlock = async () => {
+    if (!connection || unlockPending || unlockCooldown) return;
+
+    setUnlockPending(true);
+    setUnlockMessage(null);
+    const controller = new AbortController();
+    const requestTimeout = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const response = await fetch(`${connection.url}/control/unlock`, {
+        method: "POST",
+        headers: authHeaders(connection.token),
+        signal: controller.signal
+      });
+
+      if (response.status === 200) {
+        setUnlockMessage("Unlocking...");
+      } else if (response.status === 503) {
+        setUnlockMessage("Unlock service isn't available on the laptop.");
+      } else if (response.status === 401) {
+        setUnlockMessage("Authentication failed — check your token.");
+      } else {
+        setUnlockMessage("Couldn't reach the laptop — check the connection.");
+      }
+    } catch {
+      setUnlockMessage("Couldn't reach the laptop — check the connection.");
+    } finally {
+      clearTimeout(requestTimeout);
+      setUnlockPending(false);
+      setUnlockCooldown(true);
+      setTimeout(() => setUnlockCooldown(false), 3000);
+    }
   };
 
   // ---------------------------------------------------------------------------
@@ -764,6 +873,31 @@ export default function App() {
         style={styles.hiddenKeyboard}
         value={keyboardText}
       />
+
+      {isLocked === true && (
+        <View style={styles.lockOverlay}>
+          <Text style={styles.lockIcon}>🔒</Text>
+          <Text style={styles.lockTitle}>Laptop is locked</Text>
+          {unlockMessage && <Text style={styles.lockMessage}>{unlockMessage}</Text>}
+          <Pressable
+            accessibilityRole="button"
+            disabled={unlockPending || unlockCooldown}
+            onPress={requestUnlock}
+            style={({ pressed }) => [
+              styles.unlockButton,
+              (pressed || unlockPending || unlockCooldown) && styles.unlockButtonDisabled
+            ]}
+          >
+            {unlockPending ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.unlockButtonText}>
+                {unlockCooldown ? "Please wait..." : "Unlock"}
+              </Text>
+            )}
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
@@ -823,6 +957,48 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: "#000"
+  },
+  lockOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    // Android WebView is a native, hardware-rendered view. Elevation keeps this
+    // sibling above it regardless of native layer composition timing.
+    zIndex: 20,
+    elevation: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 28,
+    backgroundColor: "rgba(5, 7, 13, 0.88)"
+  },
+  lockIcon: {
+    fontSize: 42,
+    marginBottom: 14
+  },
+  lockTitle: {
+    color: "#f8fafc",
+    fontSize: 22,
+    fontWeight: "700"
+  },
+  lockMessage: {
+    color: "#dbe7ff",
+    fontSize: 14,
+    textAlign: "center",
+    marginTop: 10
+  },
+  unlockButton: {
+    minWidth: 152,
+    minHeight: 48,
+    marginTop: 22,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#176b87"
+  },
+  unlockButtonDisabled: {
+    opacity: 0.6
+  },
+  unlockButtonText: {
+    color: "#fff",
+    fontWeight: "700"
   },
   statusBadge: {
     position: "absolute",
