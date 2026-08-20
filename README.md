@@ -1,677 +1,352 @@
 # PhoneDesk — Remote Desktop from Your Phone
 
-Control and monitor your Windows laptop from anywhere using your Android phone. Built with a Python FastAPI agent on the laptop and a React Native app on mobile.
+Control and monitor a Windows PC remotely from an Android phone.
 
----
+PhoneDesk
+consists of a **Python/FastAPI agent** running on the PC and a **React Native/Expo Android app**. The system provides live screen streaming, remote input, system monitoring, and remote connectivity.
 
-## What It Does
+## Features
 
-- Live screen streaming from your laptop to your phone
-- Touch-to-click and drag controls
-- Keyboard input from your phone
-- System status monitoring (CPU, RAM, running processes)
-- Screenshot capture
-- Works on local WiFi and remotely via Tailscale or Cloudflare Tunnel
-- Runs automatically at Windows startup via system tray
-
----
+* 📺 Live PC screen streaming
+* 🖱️ Touch-based mouse control
+* ⌨️ Remote keyboard input
+* 📊 CPU, RAM, and process monitoring
+* 📸 Remote screenshots
+* 🔊 Real-time audio streaming
+* 🖥️ Windows system-tray agent
+* 🔄 Automatic startup support
+* 🌐 Local-network and remote connectivity
+* 🚀 Smooth screen streaming up to 60 FPS
 
 ## Architecture
 
+```text
+Android App
+     │
+     │ HTTP / WebSocket
+     ▼
+Tailscale / Local Network
+     │
+     ▼
+Python FastAPI Agent
+     │
+     ├── Screen Capture
+     ├── JPEG / MJPEG Streaming
+     ├── Mouse & Keyboard Control
+     ├── System Monitoring
+     └── Audio Streaming
 ```
-Phone App (React Native)
-        ↕
-  Tailscale / Local IP
-        ↕
-Python Agent (FastAPI)
-        ↕
-  Screen Capture (mss)
-  JPEG Encoding (Pillow)
-  Input Control (pyautogui)
-```
 
-### Streaming Approach
+### Video Streaming
 
-The agent captures the screen using `mss`, encodes each frame as JPEG using Pillow with `subsampling=0` for maximum sharpness, and streams it as **MJPEG (multipart/x-mixed-replace)** over HTTP. The mobile app renders the stream inside a WebView using an HTML `<img>` tag. Only changed frames are sent using a hash check to reduce bandwidth.
+The PC captures the screen and encodes frames as JPEG images. Frames are delivered to the Android app as an **MJPEG HTTP stream**.
 
-### Remote Access
+The current implementation focuses on keeping the stream smooth and responsive while avoiding unnecessary frame transmission.
 
-For remote access outside your home network, **Tailscale** is used. It creates a permanent peer-to-peer VPN between your phone and laptop with a fixed IP that never changes. No relay servers, no random URLs.
+### Remote Connectivity
 
----
+For remote access, **Tailscale** can provide connectivity between the Android phone and PC without requiring a public IP or manual port forwarding.
+
+Local-network connections can also be used when the phone and PC are on the same network.
 
 ## Tech Stack
 
-### Laptop Agent
-| Component | Technology |
-|---|---|
-| API Server | FastAPI + Uvicorn |
-| Screen Capture | mss |
-| Image Encoding | Pillow |
-| Input Control | pyautogui |
-| System Stats | psutil |
-| System Tray | pystray |
-| Audio Streaming | sounddevice |
-| Python Version | 3.13 |
+### PC Agent
 
-### Mobile App
-| Component | Technology |
-|---|---|
-| Framework | React Native (Expo) |
-| Stream Rendering | WebView + MJPEG img tag |
-| Touch Controls | PanResponder |
-| Build Tool | Android Studio + Gradle |
-| Min Android | Android 8.0 (API 26) |
+| Component         | Technology           |
+| ----------------- | -------------------- |
+| API               | FastAPI + Uvicorn    |
+| Screen Capture    | DXCam / MSS fallback |
+| Image Encoding    | OpenCV / JPEG        |
+| Input Control     | PyAutoGUI            |
+| System Monitoring | psutil               |
+| System Tray       | pystray              |
+| Audio             | sounddevice          |
+| Language          | Python 3.13          |
 
-### Infrastructure
-| Purpose | Tool |
-|---|---|
-| Remote Access | Tailscale (free) |
-| Backup Tunnel | Cloudflare Tunnel (free) |
-| Screen Encoding | MJPEG via Pillow |
-| Hardware | NVIDIA GTX 1650 (NVENC available) |
+### Android App
 
----
+| Component       | Technology                    |
+| --------------- | ----------------------------- |
+| Framework       | React Native                  |
+| Platform        | Expo                          |
+| Language        | TypeScript                    |
+| Video Rendering | WebView + MJPEG               |
+| Touch Input     | React Native gesture handling |
+| Android Build   | EAS Build                     |
+
+### Connectivity
+
+* Local network
+* Tailscale
+* Cloudflare Tunnel for testing/backup connectivity
 
 ## Project Structure
 
-```
+```text
 Connect/
-├── agent/                        # Python laptop agent
-│   ├── agent.py                  # Main FastAPI server + tray app
-│   ├── start_agent.bat           # Windows startup batch file
-│   ├── requirements.txt          # Python dependencies
-│   ├── screenshots/              # Saved screenshots
-│   └── .venv/                    # Python virtual environment
+├── agent/
+│   ├── agent.py
+│   ├── requirements.txt
+│   └── ...
 │
-└── mobile/                       # React Native mobile app
-    ├── App.tsx                   # Main app component
-    ├── app.json                  # Expo configuration
-    ├── package.json              # Node dependencies
-    ├── assets/                   # Icons and splash screen
-    └── android/                  # Native Android build files
+└── mobile/
+    ├── App.tsx
+    ├── app.json
+    ├── eas.json
+    ├── package.json
+    ├── package-lock.json
+    ├── assets/
+    └── android/
 ```
 
----
+## Requirements
 
-## Prerequisites
+### PC
 
-### Laptop
-- Windows 10/11
-- Python 3.13
-- FFmpeg installed and in PATH
-- NVIDIA GPU (optional, for NVENC hardware encoding)
-- Tailscale installed
+* Windows 10/11
+* Python 3.13
+* FFmpeg
+* Tailscale
+* Required Python packages from `agent/requirements.txt`
 
-### Mobile
-- Android 8.0 or higher
-- Tailscale app installed
-- Same Tailscale account as laptop
+### Android
 
-### Development (to build the app)
-- Node.js 18+
-- Android Studio
-- Android SDK
-- Java JDK (bundled with Android Studio)
+* Android 8.0+ recommended
+* Tailscale when using remote access
+* Connect APK
 
----
+### Development
+
+* Node.js
+* npm
+* Expo / EAS CLI
+
+**Android Studio is not required for EAS cloud builds.**
 
 ## Installation
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/connect
-cd connect
+git clone https://github.com/kirthivasanr/PhoneDesk.git
+cd Connect
 ```
 
-### 2. Set Up the Python Agent
+### 2. Set Up the PC Agent
 
-```bash
+```powershell
 cd agent
+
 python -m venv .venv
 .venv\Scripts\activate
+
 pip install -r requirements.txt
 ```
 
 ### 3. Install FFmpeg
 
-Download from https://www.gyan.dev/ffmpeg/builds/ — get `ffmpeg-release-essentials.zip`. Extract and add the `bin` folder to your system PATH.
+Install FFmpeg and make sure it is available through the system PATH.
 
 Verify:
-```bash
+
+```powershell
 ffmpeg -version
 ```
 
-### 4. Configure the Token
+### 4. Configure Authentication
 
-In `agent.py` find and set your token:
-```python
-DEFAULT_TOKEN = "your-secret-token-here"
-```
+Do not commit real authentication tokens or secrets to Git.
 
-### 5. Set Up the Mobile App
+Set the required authentication token using the project's supported environment/configuration mechanism.
 
-```bash
-cd mobile
+### 5. Install the Mobile Dependencies
+
+```powershell
+cd ..\mobile
 npm install
 ```
 
-### 6. Build the Android APK
-
-Make sure your phone is connected via USB with USB Debugging enabled, then:
-
-```bash
-npx expo run:android --variant release
-```
-
-The APK will be at:
-```
-mobile/android/app/build/outputs/apk/release/app-release.apk
-```
-
-Install it on your phone directly.
-
----
-
 ## Running the Agent
 
-### Manual Start
+From the `agent` directory:
 
-```bash
-cd agent
+```powershell
 .venv\Scripts\python.exe agent.py
 ```
 
-The system tray icon will appear. Right-click for options.
+The agent starts the FastAPI server and system-tray interface.
 
-### Auto Start at Boot
+## Building the Android APK
 
-The agent is configured to start automatically at Windows login via Task Scheduler. To set it up:
+PhoneDesk uses **EAS Build** for cloud-based Android builds.
 
-```cmd
-schtasks /create /tn "RemoteDesktopAgent" /tr "C:\path\to\Connect\agent\start_agent.bat" /sc onlogon /ru YOUR_USERNAME /f
+Install EAS CLI:
+
+```powershell
+npm install -g eas-cli
 ```
 
-To test without restarting:
-```cmd
-schtasks /run /tn "RemoteDesktopAgent"
+Log in:
+
+```powershell
+eas login
 ```
 
----
+Configure EAS if required:
 
-## System Tray Menu
-
-Right-click the tray icon for these options:
-
-| Option | Description |
-|---|---|
-| Show Status | Opens status window with CPU, RAM, connections |
-| Copy Tailscale URL | Copies your permanent remote URL to clipboard |
-| Start Agent | Starts the FastAPI server |
-| Stop Agent | Stops the FastAPI server |
-| Exit | Closes everything |
-
----
-
-## Connecting from Your Phone
-
-### Same WiFi (Local)
-Enter in the app:
-```
-http://192.168.29.31:8000
+```powershell
+eas build:configure
 ```
 
-### Remote (Tailscale)
-1. Open Tailscale on your phone — make sure it's connected
-2. Open the Connect app
-3. Enter your laptop's Tailscale IP:
+Build an installable APK:
+
+```powershell
+eas build --platform android --profile preview
 ```
+
+The completed build provides an APK that can be downloaded and installed directly on an Android device.
+
+## Connecting the Android App
+
+### Local Network
+
+When the phone and PC are on the same network, use the PC's local IP address:
+
+```text
+http://<PC-IP>:8000
+```
+
+### Tailscale
+
+For remote access:
+
+1. Install Tailscale on both devices.
+2. Sign in to the same Tailscale network.
+3. Start the PC agent.
+4. Enter the PC's Tailscale IP in PhoneDesk.
+
+Example:
+
+```text
 http://100.x.x.x:8000
 ```
-4. Enter your token and tap Connect
 
-The Tailscale IP never changes so you can save it permanently in the app.
+Enter the configured authentication token and connect.
 
-### Remote (Cloudflare Tunnel — backup)
-Run in a separate terminal:
-```cmd
-cloudflared tunnel --url http://localhost:8000
-```
-Use the generated `https://xxx.trycloudflare.com` URL in the app. Note this URL changes every session.
+## API
 
----
+The agent exposes HTTP and WebSocket endpoints for communication between the Android app and PC.
 
-## API Endpoints
+| Method | Endpoint              | Purpose            |
+| ------ | --------------------- | ------------------ |
+| GET    | `/mjpeg`              | Live screen stream |
+| GET    | `/screen`             | Screen information |
+| GET    | `/status`             | System status      |
+| POST   | `/control/move`       | Mouse movement     |
+| POST   | `/control/click`      | Mouse click        |
+| POST   | `/control/key`        | Keyboard input     |
+| POST   | `/control/screenshot` | Screenshot         |
+| WS     | `/ws/audio`           | Audio stream       |
 
-All endpoints require Bearer token authentication via `Authorization: Bearer <token>` header, except `/stream` and `/screen` which accept `?token=` query parameter.
+Authentication is required for protected endpoints.
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/mjpeg?token=` | MJPEG screen stream |
-| GET | `/screen?token=` | Screen resolution info |
-| GET | `/status` | CPU, RAM, process list |
-| POST | `/control/move` | Move mouse to x,y |
-| POST | `/control/click` | Click mouse at x,y |
-| POST | `/control/key` | Send keyboard input |
-| POST | `/control/screenshot` | Save screenshot |
-| WS | `/ws/audio?token=` | Real-time audio stream |
+## Controls
 
----
+| Gesture / Control | Action                   |
+| ----------------- | ------------------------ |
+| Single tap        | Left click               |
+| Double tap        | Double click             |
+| Drag              | Mouse movement           |
+| Pinch             | Zoom                     |
+| Two-finger drag   | Pan                      |
+| Win               | Windows key              |
+| Esc               | Escape                   |
+| Enter             | Enter                    |
+| Backspace         | Backspace                |
+| Win+Tab           | Switch/open Windows view |
+| Alt+F4            | Close active application |
+| Scroll Up         | Scroll up                |
+| Scroll Down       | Scroll down              |
+| Keys              | Toggle keyboard          |
+| Off               | Disconnect               |
 
-## Mobile App Controls
+## Performance
 
-### Touch Controls
-| Gesture | Action |
-|---|---|
-| Single tap | Left click |
-| Double tap | Double click |
-| Drag | Mouse move |
-| Pinch | Zoom in/out |
-| Two finger drag | Pan view |
+The project is designed for responsive remote desktop viewing.
 
-### Toolbar Buttons
-| Button | Action |
-|---|---|
-| Win | Windows key |
-| Esc | Escape key |
-| Enter | Enter key |
-| ⌫ | Backspace |
-| Win+Tab | Show all open apps |
-| Close App | Alt+F4 |
-| Scroll Up | Scroll up |
-| Scroll Down | Scroll down |
-| Keys | Toggle keyboard |
-| Off | Disconnect |
+Actual performance depends on:
 
----
+* Screen resolution
+* JPEG quality
+* Frame rate
+* PC performance
+* Network bandwidth
+* Network latency
+* Tailscale connectivity path
+* Mobile network conditions
 
-## Bandwidth Usage
-
-| Connection | Approximate Usage |
-|---|---|
-| Local WiFi | ~2-4 MB/s |
-| Tailscale (same WiFi) | ~2-4 MB/s |
-| Tailscale (mobile data) | ~2-4 MB/s (requires good 4G) |
-| Cloudflare Tunnel | ~2-4 MB/s |
-
-Minimum recommended: **16 Mbps** download on the receiving device for smooth streaming at 30fps quality 95.
-
----
+Local Wi-Fi generally provides the best experience. Remote mobile connections may require lower streaming quality or frame rate depending on network conditions.
 
 ## Troubleshooting
 
-**Stream freezes after a while**
-The agent automatically restarts the capture thread. Disconnect and reconnect from the app.
+### Stream is frozen
 
-**Black screen on connect**
-Make sure `android:usesCleartextTraffic="true"` is set in `AndroidManifest.xml`. This is required for HTTP streaming on Android.
+Restart the connection from the Android app and verify that the PC agent is running.
 
-**Agent not starting at boot**
-Run `schtasks /run /tn "RemoteDesktopAgent"` to test manually. Check that the paths in `start_agent.bat` are correct.
+### Cannot connect remotely
 
-**High latency on mobile data**
-This is a bandwidth limitation of mobile networks. Use on WiFi for best experience.
+Check that:
 
-**FFmpeg not found**
-Make sure FFmpeg is installed and the `bin` folder is in your system PATH. Run `ffmpeg -version` to verify.
+* Tailscale is connected on both devices.
+* The PC agent is running.
+* The correct Tailscale IP is being used.
+* The configured port is reachable.
 
----
+### FFmpeg is not detected
 
-## Known Limitations
+Run:
 
-- Android only (iOS requires HTTPS and additional configuration)
-- MJPEG has no audio channel — audio is streamed separately via WebSocket
-- High quality streaming requires strong WiFi or fast mobile data
-- Remote access requires Tailscale running on both devices
-
----
-
-## Built With
-
-This project was built entirely from scratch as a personal remote desktop tool. It does not use any third-party remote desktop protocols or SDKs — all screen capture, encoding, streaming, and input control is implemented directly.
-
----
-
-## License
-
-MIT License — free to use, modify, and distribute.
-
-# PhoneDesk  — Remote Desktop from Your Phone
-
-Control and monitor your Windows laptop from anywhere using your Android phone. Built with a Python FastAPI agent on the laptop and a React Native app on mobile.
-
----
-
-## What It Does
-
-- Live screen streaming from your laptop to your phone
-- Touch-to-click and drag controls
-- Keyboard input from your phone
-- System status monitoring (CPU, RAM, running processes)
-- Screenshot capture
-- Works on local WiFi and remotely via Tailscale or Cloudflare Tunnel
-- Runs automatically at Windows startup via system tray
-
----
-
-## Architecture
-
-```
-Phone App (React Native)
-        ↕
-  Tailscale / Local IP
-        ↕
-Python Agent (FastAPI)
-        ↕
-  Screen Capture (mss)
-  JPEG Encoding (Pillow)
-  Input Control (pyautogui)
-```
-
-### Streaming Approach
-
-The agent captures the screen using `mss`, encodes each frame as JPEG using Pillow with `subsampling=0` for maximum sharpness, and streams it as **MJPEG (multipart/x-mixed-replace)** over HTTP. The mobile app renders the stream inside a WebView using an HTML `<img>` tag. Only changed frames are sent using a hash check to reduce bandwidth.
-
-### Remote Access
-
-For remote access outside your home network, **Tailscale** is used. It creates a permanent peer-to-peer VPN between your phone and laptop with a fixed IP that never changes. No relay servers, no random URLs.
-
----
-
-## Tech Stack
-
-### Laptop Agent
-| Component | Technology |
-|---|---|
-| API Server | FastAPI + Uvicorn |
-| Screen Capture | mss |
-| Image Encoding | Pillow |
-| Input Control | pyautogui |
-| System Stats | psutil |
-| System Tray | pystray |
-| Audio Streaming | sounddevice |
-| Python Version | 3.13 |
-
-### Mobile App
-| Component | Technology |
-|---|---|
-| Framework | React Native (Expo) |
-| Stream Rendering | WebView + MJPEG img tag |
-| Touch Controls | PanResponder |
-| Build Tool | Android Studio + Gradle |
-| Min Android | Android 8.0 (API 26) |
-
-### Infrastructure
-| Purpose | Tool |
-|---|---|
-| Remote Access | Tailscale (free) |
-| Backup Tunnel | Cloudflare Tunnel (free) |
-| Screen Encoding | MJPEG via Pillow |
-| Hardware | NVIDIA GTX 1650 (NVENC available) |
-
----
-
-## Project Structure
-
-```
-Connect/
-├── agent/                        # Python laptop agent
-│   ├── agent.py                  # Main FastAPI server + tray app
-│   ├── start_agent.bat           # Windows startup batch file
-│   ├── requirements.txt          # Python dependencies
-│   ├── screenshots/              # Saved screenshots
-│   └── .venv/                    # Python virtual environment
-│
-└── mobile/                       # React Native mobile app
-    ├── App.tsx                   # Main app component
-    ├── app.json                  # Expo configuration
-    ├── package.json              # Node dependencies
-    ├── assets/                   # Icons and splash screen
-    └── android/                  # Native Android build files
-```
-
----
-
-## Prerequisites
-
-### Laptop
-- Windows 10/11
-- Python 3.13
-- FFmpeg installed and in PATH
-- NVIDIA GPU (optional, for NVENC hardware encoding)
-- Tailscale installed
-
-### Mobile
-- Android 8.0 or higher
-- Tailscale app installed
-- Same Tailscale account as laptop
-
-### Development (to build the app)
-- Node.js 18+
-- Android Studio
-- Android SDK
-- Java JDK (bundled with Android Studio)
-
----
-
-## Installation
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/connect
-cd connect
-```
-
-### 2. Set Up the Python Agent
-
-```bash
-cd agent
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3. Install FFmpeg
-
-Download from https://www.gyan.dev/ffmpeg/builds/ — get `ffmpeg-release-essentials.zip`. Extract and add the `bin` folder to your system PATH.
-
-Verify:
-```bash
+```powershell
 ffmpeg -version
 ```
 
-### 4. Configure the Token
+If the command is not recognized, add FFmpeg's `bin` directory to the system PATH.
 
-In `agent.py` find and set your token:
-```python
-DEFAULT_TOKEN = "your-secret-token-here"
+### Android build fails
+
+Check the EAS build logs:
+
+```powershell
+eas build:list
 ```
 
-### 5. Set Up the Mobile App
+Then inspect the relevant build with:
 
-```bash
-cd mobile
-npm install
+```powershell
+eas build:view <BUILD_ID>
 ```
 
-### 6. Build the Android APK
+## Current Limitations
 
-Make sure your phone is connected via USB with USB Debugging enabled, then:
+* Android-focused implementation
+* MJPEG uses more bandwidth than modern inter-frame video codecs
+* Remote streaming performance depends heavily on network quality
+* Tailscale connectivity may vary depending on whether a direct or relayed connection is established
+* iOS support is not currently provided
 
-```bash
-npx expo run:android --variant release
-```
+## Development Status
 
-The APK will be at:
-```
-mobile/android/app/build/outputs/apk/release/app-release.apk
-```
+PhoneDesk is an actively developed personal remote-desktop project.
 
-Install it on your phone directly.
+Current development priorities include:
 
----
-
-## Running the Agent
-
-### Manual Start
-
-```bash
-cd agent
-.venv\Scripts\python.exe agent.py
-```
-
-The system tray icon will appear. Right-click for options.
-
-### Auto Start at Boot
-
-The agent is configured to start automatically at Windows login via Task Scheduler. To set it up:
-
-```cmd
-schtasks /create /tn "RemoteDesktopAgent" /tr "C:\path\to\Connect\agent\start_agent.bat" /sc onlogon /ru YOUR_USERNAME /f
-```
-
-To test without restarting:
-```cmd
-schtasks /run /tn "RemoteDesktopAgent"
-```
-
----
-
-## System Tray Menu
-
-Right-click the tray icon for these options:
-
-| Option | Description |
-|---|---|
-| Show Status | Opens status window with CPU, RAM, connections |
-| Copy Tailscale URL | Copies your permanent remote URL to clipboard |
-| Start Agent | Starts the FastAPI server |
-| Stop Agent | Stops the FastAPI server |
-| Exit | Closes everything |
-
----
-
-## Connecting from Your Phone
-
-### Same WiFi (Local)
-Enter in the app:
-```
-http://192.168.x.x:8000
-```
-
-### Remote (Tailscale)
-1. Open Tailscale on your phone — make sure it's connected
-2. Open the Connect app
-3. Enter your laptop's Tailscale IP:
-```
-http://100.x.x.x:8000
-```
-4. Enter your token and tap Connect
-
-The Tailscale IP never changes so you can save it permanently in the app.
-
-### Remote (Cloudflare Tunnel — backup)
-Run in a separate terminal:
-```cmd
-cloudflared tunnel --url http://localhost:8000
-```
-Use the generated `https://xxx.trycloudflare.com` URL in the app. Note this URL changes every session.
-
----
-
-## API Endpoints
-
-All endpoints require Bearer token authentication via `Authorization: Bearer <token>` header, except `/stream` and `/screen` which accept `?token=` query parameter.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/mjpeg?token=` | MJPEG screen stream |
-| GET | `/screen?token=` | Screen resolution info |
-| GET | `/status` | CPU, RAM, process list |
-| POST | `/control/move` | Move mouse to x,y |
-| POST | `/control/click` | Click mouse at x,y |
-| POST | `/control/key` | Send keyboard input |
-| POST | `/control/screenshot` | Save screenshot |
-| WS | `/ws/audio?token=` | Real-time audio stream |
-
----
-
-## Mobile App Controls
-
-### Touch Controls
-| Gesture | Action |
-|---|---|
-| Single tap | Left click |
-| Double tap | Double click |
-| Drag | Mouse move |
-| Pinch | Zoom in/out |
-| Two finger drag | Pan view |
-
-### Toolbar Buttons
-| Button | Action |
-|---|---|
-| Win | Windows key |
-| Esc | Escape key |
-| Enter | Enter key |
-| ⌫ | Backspace |
-| Win+Tab | Show all open apps |
-| Close App | Alt+F4 |
-| Scroll Up | Scroll up |
-| Scroll Down | Scroll down |
-| Keys | Toggle keyboard |
-| Off | Disconnect |
-
----
-
-## Bandwidth Usage
-
-| Connection | Approximate Usage |
-|---|---|
-| Local WiFi | ~2-4 MB/s |
-| Tailscale (same WiFi) | ~2-4 MB/s |
-| Tailscale (mobile data) | ~2-4 MB/s (requires good 4G) |
-| Cloudflare Tunnel | ~2-4 MB/s |
-
-Minimum recommended: **16 Mbps** download on the receiving device for smooth streaming at 30fps quality 95.
-
----
-
-## Troubleshooting
-
-**Stream freezes after a while**
-The agent automatically restarts the capture thread. Disconnect and reconnect from the app.
-
-**Black screen on connect**
-Make sure `android:usesCleartextTraffic="true"` is set in `AndroidManifest.xml`. This is required for HTTP streaming on Android.
-
-**Agent not starting at boot**
-Run `schtasks /run /tn "RemoteDesktopAgent"` to test manually. Check that the paths in `start_agent.bat` are correct.
-
-**High latency on mobile data**
-This is a bandwidth limitation of mobile networks. Use on WiFi for best experience.
-
-**FFmpeg not found**
-Make sure FFmpeg is installed and the `bin` folder is in your system PATH. Run `ffmpeg -version` to verify.
-
----
-
-## Known Limitations
-
-- Android only (iOS requires HTTPS and additional configuration)
-- MJPEG has no audio channel — audio is streamed separately via WebSocket
-- High quality streaming requires strong WiFi or fast mobile data
-- Remote access requires Tailscale running on both devices
-
----
-
-## Built With
-
-This project was built entirely from scratch as a personal remote desktop tool. It does not use any third-party remote desktop protocols or SDKs — all screen capture, encoding, streaming, and input control is implemented directly.
-
----
+* Improving remote-network performance
+* Improving streaming stability
+* Optimizing bandwidth usage
+* Improving Android experience
+* Further refining the PC agent
 
 ## License
 
-MIT License — free to use, modify, and distribute.
+MIT License.
